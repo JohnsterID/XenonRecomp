@@ -247,7 +247,7 @@ typedef struct _XXOVERLAPPED {
         {
             be<uint32_t> Error;
             be<uint32_t> Length;
-        };
+        } s;
 
         struct
         {
