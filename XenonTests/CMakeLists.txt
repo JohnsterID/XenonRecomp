@@ -9,13 +9,16 @@ if(TEST_FILES)
     )
     target_include_directories(XenonTests PRIVATE
         ${CMAKE_SOURCE_DIR}/XenonRecomp
+        ${CMAKE_SOURCE_DIR}/XenonUtils
         ${CMAKE_SOURCE_DIR}/XenonAnalyse
         ${CMAKE_SOURCE_DIR}/thirdparty/tomlplusplus/include
         ${CMAKE_SOURCE_DIR}/thirdparty/xxHash
+        ${CMAKE_SOURCE_DIR}/thirdparty/disasm
     )
     target_link_libraries(XenonTests 
         PUBLIC 
             XenonUtils
+            disasm  # PPC disassembly library
             fmt::fmt
             GTest::GTest
             GTest::Main
