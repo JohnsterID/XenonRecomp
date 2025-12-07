@@ -7,6 +7,7 @@ add_library(XenonUtils
     "xdbf_wrapper.cpp"
     "xex_patcher.cpp"
     "memory_mapped_file.cpp"
+    "symbol_resolver.cpp"
     "${THIRDPARTY_ROOT}/libmspack/libmspack/mspack/lzxd.c"
     "${THIRDPARTY_ROOT}/tiny-AES-c/aes.c"
 )
@@ -29,4 +30,5 @@ target_include_directories(XenonUtils
 target_link_libraries(XenonUtils 
     PUBLIC
         disasm
+        fmt::fmt
 )

@@ -6,7 +6,9 @@
 #include <file.h>
 #include <image.h>
 #include <xbox.h>
+#include <symbol_resolver.h>
 #include <map>
+#include <filesystem>
 
 #define SWITCH_ABSOLUTE 0
 #define SWITCH_COMPUTED 1
@@ -368,7 +370,8 @@ int main(int argc, char** argv)
 {
     if (argc < 3)
     {
-        printf("Usage: XenonAnalyse [input XEX file path] [output TOML config file path] [optional: output directory path]");
+        printf("Usage: XenonAnalyse [input XEX file path] [output TOML config file path] [optional: output directory path] [optional: symbol file path]\n");
+        printf("  symbol file: JSON file with extracted PDB symbols (from extract_symbols.py)\n");
         return EXIT_SUCCESS;
     }
 
@@ -377,6 +380,20 @@ int main(int argc, char** argv)
     
     auto image = Image::ParseImage(file.data(), file.size());
     fmt::println("Image parsed, size: {}, sections: {}", image.size, image.sections.size());
+
+    // Load symbol information if provided
+    bool hasSymbols = false;
+    if (argc >= 5) {
+        std::string symbolFile = argv[4];
+        if (InitializeSymbolResolver(symbolFile)) {
+            hasSymbols = true;
+            fmt::println("✅ Loaded {} symbols from: {}", g_symbolResolver->GetSymbolCount(), symbolFile);
+        } else {
+            fmt::println("⚠️  Failed to load symbols from: {}", symbolFile);
+        }
+    } else {
+        fmt::println("ℹ️  No symbol file provided - using generic function names");
+    }
 
     // Store runtime function addresses for TOML generation
     std::map<std::string, uint32_t> runtimeFunctions;
@@ -573,13 +590,61 @@ int main(int argc, char** argv)
     scanPattern(offsetSwitch, std::size(offsetSwitch), SWITCH_BYTEOFFSET);
     scanPattern(wordOffsetSwitch, std::size(wordOffsetSwitch), SWITCH_SHORTOFFSET);
     
+    // Add binary structure information
     println("");
+    println("# Binary Structure Information");
+    println("[binary_info]");
+    println("file_size = {}", std::filesystem::file_size(inputPath));
+    println("image_size = {}", image.size);
+    println("section_count = {}", image.sections.size());
+    println("");
+    
+    // Add section information
+    println("# Section Layout");
+    for (const auto& section : image.sections) {
+        // Clean section name for TOML compatibility
+        std::string cleanName = section.name;
+        std::replace(cleanName.begin(), cleanName.end(), '\f', ' '); // Form feed
+        std::replace(cleanName.begin(), cleanName.end(), '\v', ' '); // Vertical tab
+        std::replace(cleanName.begin(), cleanName.end(), '\r', ' '); // Carriage return
+        std::replace(cleanName.begin(), cleanName.end(), '\n', ' '); // Newline
+        
+        println("# {} - Base: 0x{:X}, Size: 0x{:X}, Flags: 0x{:X}", 
+                cleanName, section.base, section.size, static_cast<uint32_t>(section.flags));
+    }
+    println("");
+
+    // Add debug information configuration
+    if (hasSymbols && g_symbolResolver) {
+        println("# Debug Information Configuration");
+        println("[debug_info]");
+        if (argc > 4) {
+            println("symbols_file = \"{}\"", argv[4]);
+        }
+        println("symbol_count = {}", g_symbolResolver->GetSymbolCount());
+        println("");
+
+        println("# Symbol Database Information");
+        println("# Use the symbols_file for comprehensive symbol lookup");
+        println("# Symbols can be searched by pattern, type, or name");
+        println("# Total symbols available: {}", g_symbolResolver->GetSymbolCount());
+        println("");
+    }
+    
     println("# Advanced Configuration Examples (uncomment and modify as needed)");
     println("");
     println("# Specific function targeting:");
-    println("# [[functions]]");
-    println("# address = 0x82000000");
-    println("# size = 0x1000");
+    if (hasSymbols) {
+        println("# [[functions]]");
+        println("# address = 0x82000000  # Use XEX analysis to find actual addresses");
+        println("# size = 0x1000");
+        println("# # Example: Target a specific game function");
+        println("# # Look for symbols like 'Player::Update' or 'GameMain::Initialize'");
+    } else {
+        println("# [[functions]]");
+        println("# address = 0x82000000");
+        println("# size = 0x1000");
+    }
     println("");
     println("# Invalid instruction detection (for padding/exception handlers):");
     println("# [[invalid_instructions]]");
