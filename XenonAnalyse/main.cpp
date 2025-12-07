@@ -44,6 +44,11 @@ void RegisterFunctionsSearch(Image& image)
 {
     uint32_t baseAddress = UINT32_MAX;
 
+    // fmt::println("DEBUG: Available sections in RegisterFunctionsSearch:");
+    // for (const auto& section : image.sections) {
+    //     fmt::println("  - Section: '{}', base: 0x{:X}, size: {}", section.name, section.base, section.size);
+    // }
+
     for (const auto& section : image.sections) {
         if (section.name == ".text") {
             baseAddress = section.base;
@@ -71,6 +76,130 @@ void RegisterFunctionsSearch(Image& image)
             fmt::println("restvmx_64_address = 0x{:X}", restvmx_64);
             fmt::println("savevmx_64_address = 0x{:X}", savevmx_64);
         }
+    }
+}
+
+void LongJmpSetJmpSearch(Image& image)
+{
+    uint32_t baseAddress = UINT32_MAX;
+    const uint8_t* data = nullptr;
+    uint32_t dataSize = 0;
+
+    for (const auto& section : image.sections) {
+        // fmt::println("DEBUG: Found section: {}", section.name);
+        if (section.name == ".text") {
+            baseAddress = section.base;
+            data = section.data;
+            dataSize = section.size;
+            break;
+        }
+    }
+
+    if (baseAddress == UINT32_MAX || data == nullptr) {
+        fmt::println("ERROR: .text section not found for longjmp/setjmp search");
+        fmt::println("Available sections:");
+        for (const auto& section : image.sections) {
+            fmt::println("  - {}", section.name);
+        }
+        return;
+    }
+
+    fmt::println("# ---- LONGJMP/SETJMP FUNCTIONS ----");
+
+    // Pattern 1: setjmp - look for mflr r0 followed by floating-point register saves
+    // This pattern: mflr r0; mfcr r0; stfd f14, 0(r3); stfd f15, 8(r3); ...
+    static const uint8_t SETJMP_PATTERN[] = { 0x7c, 0x08, 0x02, 0xa6, 0x7c, 0x80, 0x00, 0x26, 0xd9, 0xc3, 0x00, 0x00 };
+    
+    // Pattern 2: longjmp - look for floating-point register loads followed by mtlr r0; blr
+    // This pattern: lfd f14, 0(r3); lfd f15, 8(r3); ... mtlr r0; blr
+    static const uint8_t LONGJMP_PATTERN1[] = { 0xc9, 0xc3, 0x00, 0x00, 0xc9, 0xe3, 0x00, 0x08 }; // lfd f14,0(r3); lfd f15,8(r3)
+    static const uint8_t LONGJMP_PATTERN2[] = { 0x7c, 0x08, 0x03, 0xa6, 0x4e, 0x80, 0x00, 0x20 }; // mtlr r0; blr
+    
+    // Pattern 3: Alternative setjmp - simple li r3, 0; blr in C runtime area
+    static const uint8_t SETJMP_SIMPLE[] = { 0x38, 0x60, 0x00, 0x00, 0x4e, 0x80, 0x00, 0x20 }; // li r3, 0; blr
+
+    uint32_t setjmpAddress = UINT32_MAX;
+    uint32_t longjmpAddress = UINT32_MAX;
+
+    // Search for setjmp pattern (mflr r0; mfcr r0; stfd f14, 0(r3))
+    uint32_t setjmpOffset = BytePatternSearch(const_cast<uint8_t*>(data), dataSize, baseAddress, SETJMP_PATTERN, sizeof(SETJMP_PATTERN));
+    if (setjmpOffset != UINT32_MAX) {
+        setjmpAddress = setjmpOffset;
+        fmt::println("setjmp_address = 0x{:X}", setjmpAddress);
+    }
+
+    // Search for longjmp pattern - look for functions with FPR loads
+    for (uint32_t i = 0; i < dataSize - sizeof(LONGJMP_PATTERN1) - 64; i += 4) {
+        // Look for the FPR load pattern
+        if (std::equal(LONGJMP_PATTERN1, LONGJMP_PATTERN1 + sizeof(LONGJMP_PATTERN1), data + i)) {
+            // Look ahead for mtlr r0; blr within reasonable distance
+            for (uint32_t j = i + sizeof(LONGJMP_PATTERN1); j < i + 256 && j < dataSize - sizeof(LONGJMP_PATTERN2); j += 4) {
+                if (std::equal(LONGJMP_PATTERN2, LONGJMP_PATTERN2 + sizeof(LONGJMP_PATTERN2), data + j)) {
+                    // Found a potential longjmp function
+                    // Look backwards for function start
+                    uint32_t funcStart = i;
+                    for (int k = 1; k <= 16 && funcStart >= 4; k++) {
+                        funcStart -= 4;
+                        uint32_t word = (data[funcStart] << 24) | (data[funcStart + 1] << 16) | 
+                                       (data[funcStart + 2] << 8) | data[funcStart + 3];
+                        if ((word & 0xFFFF0000) == 0x94210000) { // stwu r1, -offset(r1)
+                            longjmpAddress = baseAddress + funcStart;
+                            fmt::println("longjmp_address = 0x{:X}", longjmpAddress);
+                            goto longjmp_found;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    longjmp_found:
+
+    // If we didn't find the complex patterns, look for simpler ones
+    if (setjmpAddress == UINT32_MAX) {
+        // Look for simple setjmp pattern in C runtime area (around 0x82497A54 based on analysis)
+        // Search for clusters of li r3, 0; blr patterns
+        std::vector<uint32_t> simpleCandidates;
+        for (uint32_t i = 0; i < dataSize - sizeof(SETJMP_SIMPLE); i += 4) {
+            if (std::equal(SETJMP_SIMPLE, SETJMP_SIMPLE + sizeof(SETJMP_SIMPLE), data + i)) {
+                simpleCandidates.push_back(i);
+            }
+        }
+        
+        // Look for the area with the highest density of these patterns (C runtime area)
+        if (!simpleCandidates.empty()) {
+            // Find the area with most consecutive patterns
+            uint32_t bestStart = 0;
+            uint32_t bestCount = 0;
+            
+            for (size_t i = 0; i < simpleCandidates.size(); i++) {
+                uint32_t count = 1;
+                uint32_t start = simpleCandidates[i];
+                
+                // Count consecutive patterns within 1KB
+                for (size_t j = i + 1; j < simpleCandidates.size() && 
+                     simpleCandidates[j] - start < 1024; j++) {
+                    count++;
+                }
+                
+                if (count > bestCount) {
+                    bestCount = count;
+                    bestStart = start;
+                }
+            }
+            
+            if (bestCount >= 5) { // If we found a cluster of at least 5 patterns
+                setjmpAddress = baseAddress + bestStart;
+                fmt::println("setjmp_address = 0x{:X}  # Found in C runtime area with {} similar patterns", setjmpAddress, bestCount);
+            }
+        }
+    }
+
+    // If still not found, provide guidance
+    if (setjmpAddress == UINT32_MAX) {
+        fmt::println("# setjmp_address = NOT_FOUND  # Look for functions that save registers and return 0");
+    }
+    if (longjmpAddress == UINT32_MAX) {
+        fmt::println("# longjmp_address = NOT_FOUND  # Look for functions that restore registers and jump");
     }
 }
 
@@ -243,9 +372,13 @@ int main(int argc, char** argv)
     }
 
     const auto file = LoadFile(argv[1]);
+    fmt::println("File loaded, size: {}", file.size());
+    
     auto image = Image::ParseImage(file.data(), file.size());
+    fmt::println("Image parsed, size: {}, sections: {}", image.size, image.sections.size());
 
     RegisterFunctionsSearch(image);
+    LongJmpSetJmpSearch(image);
 
     auto printTable = [&](const SwitchTable& table)
         {
